@@ -72,7 +72,10 @@ func main() {
 	pago.RegisterRoutes(v1, pagoCtrl)
 	stellar.RegisterRoutes(v1, stellarHub, horizonClient)
 
-	port := os.Getenv("APP_PORT")
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = os.Getenv("APP_PORT")
+	}
 	if port == "" {
 		port = "8080"
 	}

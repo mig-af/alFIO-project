@@ -69,7 +69,7 @@ export function LoginScreen({
               onClick={onEnterDemo}
               className="w-full rounded-lg border border-dashed border-neutral-300 px-3 py-2 text-xs font-medium text-neutral-600 transition-colors hover:border-yellow-500 hover:bg-yellow-50/50 hover:text-neutral-900 cursor-pointer"
             >
-              Entrar en modo vista previa (sin API key)
+              Entrar en modo vista previa (prueba)
             </button>
 
             {!hasPollarApiKey && (
