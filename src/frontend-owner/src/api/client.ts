@@ -1,6 +1,6 @@
 const env = import.meta.env as Record<string, string | undefined>
 
-export const API_BASE_URL = env.VITE_API_BASE_URL?.trim() || ''
+export const API_BASE_URL = env.VITEAPI_BASE_URL?.trim() || ''
 export const isRemoteApiConfigured = Boolean(API_BASE_URL)
 
 export async function apiRequest<T>(

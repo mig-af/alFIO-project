@@ -1,4 +1,4 @@
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() || ''
+const API_BASE_URL = (import.meta.env.VITEAPI_BASE_URL as string | undefined)?.trim() || ''
 
 export const isRemoteApiConfigured = Boolean(API_BASE_URL)
 

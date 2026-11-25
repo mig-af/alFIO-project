@@ -9,12 +9,12 @@ const env = import.meta.env as Record<string, string | undefined>
 export const SSE_ROUTES = {
   /** Stream donde llegan las alertas de nuevas órdenes de compra */
   orderAlerts:
-    env.VITE_SSE_ORDERS_PATH?.trim() || '/api/v1/owner/events/orders',
+    env.VITESSE_ORDERS_PATH?.trim() || '/api/v1/owner/events/orders',
 
   /** Stream donde llega la confirmación de pago de una orden aceptada */
   paymentConfirmations: (orderId: string) => {
     const basePath =
-      env.VITE_SSE_PAYMENTS_PATH?.trim() || '/api/v1/owner/events/payments'
+      env.VITESSE_PAYMENTS_PATH?.trim() || '/api/v1/owner/events/payments'
     return `${basePath}/${encodeURIComponent(orderId)}`
   },
 } as const
