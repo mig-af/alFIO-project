@@ -1,12 +1,12 @@
-const API_BASE_URL = (import.meta.env.VITEAPI_BASE_URL as string | undefined)?.trim() || ''
+import { API_URL, IS_REMOTE_API_CONFIGURED } from './paths.js'
 
-export const isRemoteApiConfigured = Boolean(API_BASE_URL)
+export const API_BASE_URL = API_URL
+export const isRemoteApiConfigured = IS_REMOTE_API_CONFIGURED
 
 export async function apiRequest<T>(
-  path: string,
+  url: string,
   options: RequestInit = {},
 ): Promise<T> {
-  const url = `${API_BASE_URL}${path}`
   const response = await fetch(url, {
     ...options,
     headers: {

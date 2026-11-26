@@ -6,4 +6,9 @@ import { defineConfig } from 'vite'
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   envPrefix: ['VITE_', 'POLLLAR_', 'POLLAR_'],
+  server:{
+    allowedHosts:[
+      "pvekm-135-237-130-224.run.pinggy-free.link"
+    ]
+  }
 })

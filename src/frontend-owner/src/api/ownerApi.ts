@@ -1,5 +1,17 @@
 import { API_BASE_URL, apiRequest, isRemoteApiConfigured } from './client'
 import rawMockData from './mockData.json'
+import {
+  RUTA_ACEPTAR_ORDEN,
+  RUTA_ANADIR_PRODUCTO,
+  RUTA_CLIENTES_OWNER,
+  RUTA_CUOTAS_OWNER,
+  RUTA_OBTENER_PRODUCTOS,
+  RUTA_OBTENER_TIENDAS,
+  RUTA_PERFIL_OWNER_POR_WALLET,
+  RUTA_PRODUCTOS_POR_TIENDA,
+  RUTA_REGISTRAR_OWNER,
+  RUTA_VENTAS_OWNER,
+} from './paths.js'
 import type {
   CreateProductRequest,
   CreateProductResponse,
@@ -8,9 +20,61 @@ import type {
   OwnerProduct,
   OwnerProfile,
   PaymentConfirmedEvent,
+  ProductSpec,
   SoldProduct,
   StoreClient,
 } from './types'
+
+// DTOs exactos devueltos por el backend en Go/Gin
+interface BackendTiendaResponse {
+  id: number
+  nombre: string
+  dueno: string
+  email_panel: string
+  billetera_g: string
+}
+
+interface BackendProductoResponse {
+  id: number
+  tienda_id: number
+  tienda_nombre?: string
+  nombre: string
+  especificaciones: string
+  precio_usd: number
+  stock: number
+  foto_url?: string
+  product_url: string
+}
+
+interface BackendClientResponse {
+  id: number
+  nombre: string
+  ci: string
+  telefono: string
+  direccion_billetera: string
+}
+
+interface BackendCreditoResponse {
+  id: number
+  cliente_id: number
+  cliente_nombre?: string
+  producto_id: number
+  producto_nombre?: string
+  total: number
+  inicial: number
+  fecha: string
+  estado: string
+}
+
+interface BackendCuotaResponse {
+  id: number
+  credito_id: number
+  numero: number
+  monto: number
+  vencimiento: string
+  estado: string
+  memo: string
+}
 
 let mockState: OwnerDashboardData = structuredClone(
   rawMockData as OwnerDashboardData,
@@ -22,17 +86,126 @@ let mockOwnerProfile: OwnerProfile = {
   email: 'tienda@alfio.app',
 }
 
+let activeTiendaId: number | null = null
+let activeOwnerWallet: string | null = null
+
+function serializeSpecs(description: string, specs: ProductSpec[]): string {
+  const parts: string[] = []
+  if (description.trim()) parts.push(description.trim())
+  for (const s of specs) {
+    if (s.label.trim() && s.value.trim()) {
+      parts.push(`${s.label.trim()}: ${s.value.trim()}`)
+    }
+  }
+  return parts.join(' | ') || 'Sin especificaciones'
+}
+
+function parseSpecs(raw: string): { description: string; specs: ProductSpec[] } {
+  const segments = raw
+    .split('|')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  const specs: ProductSpec[] = []
+  const descParts: string[] = []
+
+  for (const seg of segments) {
+    const colonIdx = seg.indexOf(':')
+    if (colonIdx > 0 && colonIdx < seg.length - 1) {
+      specs.push({
+        label: seg.slice(0, colonIdx).trim(),
+        value: seg.slice(colonIdx + 1).trim(),
+      })
+    } else {
+      descParts.push(seg)
+    }
+  }
+
+  return {
+    description: descParts.join(' · ') || raw,
+    specs,
+  }
+}
+
+function mapTiendaToProfile(t: BackendTiendaResponse): OwnerProfile {
+  activeTiendaId = t.id
+  activeOwnerWallet = t.billetera_g
+  return {
+    storeName: t.nombre,
+    ownerName: t.dueno,
+    email: t.email_panel,
+    walletAddress: t.billetera_g,
+  }
+}
+
+function mapProductoToOwnerProduct(p: BackendProductoResponse): OwnerProduct {
+  const platformFeeUsdc = Number((p.precio_usd * 0.05).toFixed(2))
+  const totalPriceUsdc = Number((p.precio_usd + platformFeeUsdc).toFixed(2))
+  const { description, specs } = parseSpecs(p.especificaciones || '')
+
+  return {
+    id: String(p.id),
+    qrCode: `ALFIO-${p.id}`,
+    storeName: p.tienda_nombre,
+    name: p.nombre,
+    photoUrl: p.foto_url || undefined,
+    description,
+    specs,
+    basePriceUsdc: p.precio_usd,
+    platformFeeUsdc,
+    totalPriceUsdc,
+    stock: p.stock,
+    active: p.stock > 0,
+    productUrl: p.product_url,
+  }
+}
+
+function computeMetrics(
+  creditos: BackendCreditoResponse[],
+  cuotas: BackendCuotaResponse[],
+): OwnerMetrics {
+  const today = new Date().toISOString().slice(0, 10)
+  const todayCredits = creditos.filter((c) => (c.fecha || '').slice(0, 10) === today)
+
+  const pendingCuotas = cuotas.filter((q) => q.estado !== 'pagada')
+  const receivableToday = pendingCuotas.filter(
+    (q) => (q.vencimiento || '').slice(0, 10) === today,
+  )
+  const overdue = pendingCuotas.filter(
+    (q) => q.estado === 'vencida' || (q.vencimiento || '').slice(0, 10) < today,
+  )
+
+  return {
+    salesTodayUsdc: Number(
+      todayCredits.reduce((acc, c) => acc + c.total, 0).toFixed(2),
+    ),
+    salesTodayCount: todayCredits.length,
+    receivableTodayUsdc: Number(
+      receivableToday.reduce((acc, q) => acc + q.monto, 0).toFixed(2),
+    ),
+    receivableTodayCount: receivableToday.length,
+    overdueAmountUsdc: Number(
+      overdue.reduce((acc, q) => acc + q.monto, 0).toFixed(2),
+    ),
+    overdueCount: overdue.length,
+  }
+}
+
 export const ownerApi = {
   /**
-   * Registra o actualiza los datos del dueño/tienda tras autenticarse con Pollar.
-   * Endpoint futuro: POST /api/v1/owner/register
+   * Registra una tienda en el backend Go/Gin: POST /api/v1/tiendas
    */
   async registerOwner(profile: OwnerProfile): Promise<OwnerProfile> {
     if (isRemoteApiConfigured) {
-      return apiRequest<OwnerProfile>('/api/v1/owner/register', {
+      const created = await apiRequest<BackendTiendaResponse>(RUTA_REGISTRAR_OWNER, {
         method: 'POST',
-        body: JSON.stringify(profile),
+        body: JSON.stringify({
+          nombre: profile.storeName,
+          dueno: profile.ownerName,
+          email_panel: profile.email,
+          billetera_g: profile.walletAddress?.trim() || '',
+        }),
       })
+      return mapTiendaToProfile(created)
     }
     mockOwnerProfile = { ...profile }
     mockState = { ...mockState, storeName: profile.storeName }
@@ -40,26 +213,57 @@ export const ownerApi = {
   },
 
   /**
-   * Obtiene el perfil del dueño actual.
-   * Endpoint futuro: GET /api/v1/owner/profile
+   * Obtiene el perfil de la tienda: GET /api/v1/tiendas/wallet/:wallet o GET /api/v1/tiendas
    */
-  async getOwnerProfile(): Promise<OwnerProfile> {
+  async getOwnerProfile(walletAddress?: string): Promise<OwnerProfile> {
     if (isRemoteApiConfigured) {
-      return apiRequest<OwnerProfile>('/api/v1/owner/profile')
+      const wallet = walletAddress?.trim() || activeOwnerWallet
+      if (wallet) {
+        const found = await apiRequest<BackendTiendaResponse>(
+          RUTA_PERFIL_OWNER_POR_WALLET(wallet),
+        )
+        return mapTiendaToProfile(found)
+      }
+      const tiendas = await apiRequest<BackendTiendaResponse[]>(RUTA_OBTENER_TIENDAS)
+      if (tiendas.length > 0) {
+        return mapTiendaToProfile(tiendas[0])
+      }
+      return structuredClone(mockOwnerProfile)
     }
     return structuredClone(mockOwnerProfile)
   },
 
   /**
-   * Crea un nuevo producto y espera la URL del producto devuelta por el backend (ej. https://backend/p/{id}).
-   * Endpoint futuro: POST /api/v1/owner/products
+   * Crea un producto en el backend Go/Gin: POST /api/v1/productos
    */
   async createProduct(payload: CreateProductRequest): Promise<CreateProductResponse> {
     if (isRemoteApiConfigured) {
-      return apiRequest<CreateProductResponse>('/api/v1/owner/products', {
+      let tiendaId = activeTiendaId
+      if (!tiendaId) {
+        const tiendas = await apiRequest<BackendTiendaResponse[]>(RUTA_OBTENER_TIENDAS)
+        if (tiendas.length > 0) {
+          tiendaId = tiendas[0].id
+          activeTiendaId = tiendaId
+        }
+      }
+
+      const created = await apiRequest<BackendProductoResponse>(RUTA_ANADIR_PRODUCTO, {
         method: 'POST',
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          tienda_id: tiendaId ?? 1,
+          nombre: payload.name,
+          especificaciones: serializeSpecs(payload.description, payload.specs),
+          precio_usd: payload.priceUsd,
+          stock: payload.stock,
+          foto_url: payload.photoUrl ?? '',
+        }),
       })
+
+      const product = mapProductoToOwnerProduct(created)
+      return {
+        product,
+        productUrl: created.product_url,
+      }
     }
 
     const id = `prod-${Date.now().toString(36)}`
@@ -97,68 +301,159 @@ export const ownerApi = {
   },
 
   /**
-   * Obtiene el resumen completo del dueño (métricas, productos, vendidos y clientes).
-   * Endpoint futuro: GET /api/v1/owner/dashboard
+   * Compone el dashboard consultando las rutas reales del backend:
+   * GET /api/v1/productos, GET /api/v1/creditos, GET /api/v1/clients, GET /api/v1/cuotas
    */
   async getDashboardData(): Promise<OwnerDashboardData> {
     if (isRemoteApiConfigured) {
-      return apiRequest<OwnerDashboardData>('/api/v1/owner/dashboard')
+      const [tiendas, rawProducts, rawCreditos, rawClients, rawCuotas] =
+        await Promise.all([
+          apiRequest<BackendTiendaResponse[]>(RUTA_OBTENER_TIENDAS),
+          apiRequest<BackendProductoResponse[]>(
+            activeTiendaId
+              ? RUTA_PRODUCTOS_POR_TIENDA(activeTiendaId)
+              : RUTA_OBTENER_PRODUCTOS,
+          ),
+          apiRequest<BackendCreditoResponse[]>(RUTA_VENTAS_OWNER),
+          apiRequest<BackendClientResponse[]>(RUTA_CLIENTES_OWNER),
+          apiRequest<BackendCuotaResponse[]>(RUTA_CUOTAS_OWNER),
+        ])
+
+      const currentTienda =
+        tiendas.find((t) => t.id === activeTiendaId) ?? tiendas[0]
+      if (currentTienda) {
+        activeTiendaId = currentTienda.id
+        activeOwnerWallet = currentTienda.billetera_g
+      }
+
+      const clientsById = new Map(rawClients.map((c) => [c.id, c]))
+      const cuotasByCredito = new Map<number, BackendCuotaResponse[]>()
+      for (const q of rawCuotas) {
+        const list = cuotasByCredito.get(q.credito_id) ?? []
+        list.push(q)
+        cuotasByCredito.set(q.credito_id, list)
+      }
+
+      const soldProducts: SoldProduct[] = rawCreditos.map((c) => {
+        const cuotas = cuotasByCredito.get(c.id) ?? []
+        const paidCount = cuotas.filter((q) => q.estado === 'pagada').length
+        const totalInst = cuotas.length || 4
+        const cli = clientsById.get(c.cliente_id)
+        return {
+          id: String(c.id),
+          orderId: `CRED-${c.id}`,
+          productCode: `ALFIO-${c.producto_id}`,
+          productName: c.producto_nombre || `Producto #${c.producto_id}`,
+          buyerName: c.cliente_nombre || cli?.nombre || `Cliente #${c.cliente_id}`,
+          buyerWallet: cli?.direccion_billetera || '',
+          soldAt: (c.fecha || '').slice(0, 10),
+          totalAmountUsdc: c.total,
+          downPaymentUsdc: c.inicial,
+          paidInstallments: paidCount,
+          totalInstallments: totalInst,
+          status:
+            c.estado === 'pagado' || paidCount >= totalInst ? 'completed' : 'active',
+        }
+      })
+
+      const today = new Date().toISOString().slice(0, 10)
+      const clients: StoreClient[] = rawClients.map((cli) => {
+        const cliCreditos = rawCreditos.filter((c) => c.cliente_id === cli.id)
+        const cliCuotas = cliCreditos.flatMap(
+          (c) => cuotasByCredito.get(c.id) ?? [],
+        )
+        const pending = cliCuotas.filter((q) => q.estado !== 'pagada')
+        const overdue = pending.some(
+          (q) => q.estado === 'vencida' || (q.vencimiento || '').slice(0, 10) < today,
+        )
+        const nextDue =
+          pending
+            .map((q) => (q.vencimiento || '').slice(0, 10))
+            .filter(Boolean)
+            .sort()[0] ?? null
+
+        return {
+          id: String(cli.id),
+          name: cli.nombre,
+          walletAddress: cli.direccion_billetera,
+          activeCredits: cliCreditos.filter((c) => c.estado !== 'pagado').length,
+          pendingBalanceUsdc: Number(
+            pending.reduce((acc, q) => acc + q.monto, 0).toFixed(2),
+          ),
+          nextDueDate: nextDue,
+          status: overdue ? 'overdue' : pending.length > 0 ? 'on_time' : 'completed',
+        }
+      })
+
+      return {
+        storeName: currentTienda?.nombre || mockOwnerProfile.storeName,
+        metrics: computeMetrics(rawCreditos, rawCuotas),
+        products: rawProducts.map(mapProductoToOwnerProduct),
+        soldProducts,
+        clients,
+      }
     }
     return structuredClone(mockState)
   },
 
   /**
-   * Obtiene las métricas del día (ventas de hoy, por cobrar hoy, atrasados).
-   * Endpoint futuro: GET /api/v1/owner/metrics
+   * Calcula métricas consultando GET /api/v1/creditos y GET /api/v1/cuotas
    */
   async getMetrics(): Promise<OwnerMetrics> {
     if (isRemoteApiConfigured) {
-      return apiRequest<OwnerMetrics>('/api/v1/owner/metrics')
+      const [creditos, cuotas] = await Promise.all([
+        apiRequest<BackendCreditoResponse[]>(RUTA_VENTAS_OWNER),
+        apiRequest<BackendCuotaResponse[]>(RUTA_CUOTAS_OWNER),
+      ])
+      return computeMetrics(creditos, cuotas)
     }
     return structuredClone(mockState.metrics)
   },
 
   /**
-   * Obtiene los productos registrados por el dueño.
-   * Endpoint futuro: GET /api/v1/owner/products
+   * Obtiene los productos: GET /api/v1/productos (o /tienda/:tienda_id)
    */
   async getProducts(): Promise<OwnerProduct[]> {
     if (isRemoteApiConfigured) {
-      return apiRequest<OwnerProduct[]>('/api/v1/owner/products')
+      const list = await apiRequest<BackendProductoResponse[]>(
+        activeTiendaId
+          ? RUTA_PRODUCTOS_POR_TIENDA(activeTiendaId)
+          : RUTA_OBTENER_PRODUCTOS,
+      )
+      return list.map(mapProductoToOwnerProduct)
     }
     return structuredClone(mockState.products)
   },
 
   /**
-   * Obtiene el listado de productos vendidos.
-   * Endpoint futuro: GET /api/v1/owner/sales
+   * Obtiene los créditos/ventas: GET /api/v1/creditos
    */
   async getSoldProducts(): Promise<SoldProduct[]> {
     if (isRemoteApiConfigured) {
-      return apiRequest<SoldProduct[]>('/api/v1/owner/sales')
+      const data = await this.getDashboardData()
+      return data.soldProducts
     }
     return structuredClone(mockState.soldProducts)
   },
 
   /**
-   * Obtiene la lista de clientes de la tienda.
-   * Endpoint futuro: GET /api/v1/owner/clients
+   * Obtiene los clientes: GET /api/v1/clients
    */
   async getClients(): Promise<StoreClient[]> {
     if (isRemoteApiConfigured) {
-      return apiRequest<StoreClient[]>('/api/v1/owner/clients')
+      const data = await this.getDashboardData()
+      return data.clients
     }
     return structuredClone(mockState.clients)
   },
 
   /**
-   * Confirma/acepta una orden de compra entrante antes de esperar el pago por SSE.
-   * Endpoint futuro: POST /api/v1/owner/orders/:orderId/accept
+   * Confirma/acepta una orden de compra entrante: POST /api/v1/owner/orders/:orderId/accept
    */
   async acceptOrder(orderId: string): Promise<{ accepted: boolean; orderId: string }> {
     if (isRemoteApiConfigured) {
       return apiRequest<{ accepted: boolean; orderId: string }>(
-        `/api/v1/owner/orders/${encodeURIComponent(orderId)}/accept`,
+        RUTA_ACEPTAR_ORDEN(orderId),
         { method: 'POST' },
       )
     }
@@ -166,8 +461,7 @@ export const ownerApi = {
   },
 
   /**
-   * Sincroniza localmente un pago confirmado por SSE en el estado de productos vendidos,
-   * métricas de hoy y clientes (en backend real esto también se consulta vía GET).
+   * Sincroniza un pago confirmado por SSE recargando los datos reales del backend
    */
   async recordConfirmedSale(payment: PaymentConfirmedEvent): Promise<OwnerDashboardData> {
     if (isRemoteApiConfigured) {

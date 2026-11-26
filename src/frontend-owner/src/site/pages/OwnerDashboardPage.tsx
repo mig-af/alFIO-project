@@ -42,11 +42,12 @@ export function OwnerDashboardPage() {
   const loadDashboard = useCallback(async () => {
     const [data, ownerProfile] = await Promise.all([
       ownerApi.getDashboardData(),
-      ownerApi.getOwnerProfile(),
+      // Consulta el perfil de la tienda usando la billetera G... devuelta por Pollar
+      ownerApi.getOwnerProfile(wallet.walletAddress ?? undefined),
     ])
     setDashboard(data)
     setProfile(ownerProfile)
-  }, [])
+  }, [wallet.walletAddress])
 
   useEffect(() => {
     void loadDashboard()

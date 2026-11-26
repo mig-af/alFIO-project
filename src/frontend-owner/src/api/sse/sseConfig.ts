@@ -1,26 +1,22 @@
-import { API_BASE_URL, isRemoteApiConfigured } from '../client'
-
-const env = import.meta.env as Record<string, string | undefined>
+import {
+  IS_REMOTE_API_CONFIGURED,
+  RUTA_SSE_ORDENES,
+  RUTA_SSE_PAGOS,
+} from '../paths.js'
 
 /**
- * Rutas SSE configurables para el backend en Go/Gin.
- * Se pueden sobreescribir desde .env cuando se desplieguen los endpoints reales.
+ * Rutas SSE configurables para el backend en Go/Gin (declaradas en api/paths.js).
  */
 export const SSE_ROUTES = {
   /** Stream donde llegan las alertas de nuevas órdenes de compra */
-  orderAlerts:
-    env.VITESSE_ORDERS_PATH?.trim() || '/api/v1/owner/events/orders',
+  orderAlerts: RUTA_SSE_ORDENES,
 
   /** Stream donde llega la confirmación de pago de una orden aceptada */
-  paymentConfirmations: (orderId: string) => {
-    const basePath =
-      env.VITESSE_PAYMENTS_PATH?.trim() || '/api/v1/owner/events/payments'
-    return `${basePath}/${encodeURIComponent(orderId)}`
-  },
+  paymentConfirmations: (orderId: string) => RUTA_SSE_PAGOS(orderId),
 } as const
 
-export function buildSseUrl(path: string): string {
-  return `${API_BASE_URL}${path}`
+export function buildSseUrl(url: string): string {
+  return url
 }
 
-export { isRemoteApiConfigured }
+export const isRemoteApiConfigured = IS_REMOTE_API_CONFIGURED

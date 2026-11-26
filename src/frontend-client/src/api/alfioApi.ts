@@ -1,13 +1,79 @@
 import { apiRequest, isRemoteApiConfigured } from './client'
 import rawMockData from './mockData.json'
+import {
+  RUTA_ACTUALIZAR_ESTADO_CUOTA,
+  RUTA_CATALOGO_PRODUCTOS,
+  RUTA_CLIENTE_POR_WALLET,
+  RUTA_CREAR_CREDITO,
+  RUTA_CREDITOS_POR_CLIENTE,
+  RUTA_CUOTAS_POR_CREDITO,
+  RUTA_GENERAR_CUOTAS,
+  RUTA_OBTENER_TIENDAS,
+  RUTA_PRODUCTO_POR_ID,
+  RUTA_PRODUCTO_POR_QR,
+  RUTA_REGISTRAR_PAGO,
+} from './paths.js'
 import type {
   CreateCreditPurchaseRequest,
+  InstallmentStatus,
   PayInstallmentRequest,
   PendingInstallment,
   ProductCatalogItem,
+  ProductSpec,
   PurchasedProduct,
   UserPortfolioResponse,
 } from './types'
+
+// DTOs exactos devueltos por el backend en Go/Gin
+interface BackendClientResponse {
+  id: number
+  nombre: string
+  ci: string
+  telefono: string
+  direccion_billetera: string
+}
+
+interface BackendTiendaResponse {
+  id: number
+  nombre: string
+  dueno: string
+  email_panel: string
+  billetera_g: string
+}
+
+interface BackendProductoResponse {
+  id: number
+  tienda_id: number
+  tienda_nombre?: string
+  nombre: string
+  especificaciones: string
+  precio_usd: number
+  stock: number
+  foto_url?: string
+  product_url: string
+}
+
+interface BackendCreditoResponse {
+  id: number
+  cliente_id: number
+  cliente_nombre?: string
+  producto_id: number
+  producto_nombre?: string
+  total: number
+  inicial: number
+  fecha: string
+  estado: string
+}
+
+interface BackendCuotaResponse {
+  id: number
+  credito_id: number
+  numero: number
+  monto: number
+  vencimiento: string
+  estado: string
+  memo: string
+}
 
 // Estado en memoria para el modo mock (se reemplaza automáticamente cuando VITE_API_BASE_URL está definido)
 let mockPurchasedProducts: PurchasedProduct[] = structuredClone(
@@ -24,16 +90,164 @@ function addDays(baseDate: Date, days: number): string {
   return result.toISOString().slice(0, 10)
 }
 
+function parseSpecs(raw: string): { description: string; specs: ProductSpec[] } {
+  const segments = raw
+    .split('|')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  const specs: ProductSpec[] = []
+  const descParts: string[] = []
+
+  for (const seg of segments) {
+    const colonIdx = seg.indexOf(':')
+    if (colonIdx > 0 && colonIdx < seg.length - 1) {
+      specs.push({
+        label: seg.slice(0, colonIdx).trim(),
+        value: seg.slice(colonIdx + 1).trim(),
+      })
+    } else {
+      descParts.push(seg)
+    }
+  }
+
+  return {
+    description: descParts.join(' · ') || raw,
+    specs,
+  }
+}
+
+function mapProductoToCatalogItem(
+  p: BackendProductoResponse,
+  tiendasById?: Map<number, BackendTiendaResponse>,
+): ProductCatalogItem {
+  const platformFeeUsdc = Number((p.precio_usd * 0.05).toFixed(2))
+  const totalPriceUsdc = Number((p.precio_usd + platformFeeUsdc).toFixed(2))
+  const downPaymentUsdc = Number((totalPriceUsdc / 2).toFixed(2))
+  const installmentAmountUsdc = Number((downPaymentUsdc / 4).toFixed(2))
+  const tienda = tiendasById?.get(p.tienda_id)
+  const { description, specs } = parseSpecs(p.especificaciones || '')
+
+  return {
+    id: String(p.id),
+    qrCode: `ALFIO-${p.id}`,
+    name: p.nombre,
+    storeName: p.tienda_nombre || tienda?.nombre || `Tienda #${p.tienda_id}`,
+    storeWallet: tienda?.billetera_g || '',
+    description,
+    specs,
+    basePriceUsdc: p.precio_usd,
+    platformFeeUsdc,
+    totalPriceUsdc,
+    downPaymentUsdc,
+    installmentAmountUsdc,
+    installmentsCount: 4,
+    intervalDays: 15,
+  }
+}
+
+function extractNumericProductId(rawQr: string): string | null {
+  const trimmed = rawQr.trim()
+  if (/^\d+$/.test(trimmed)) return trimmed
+  const urlMatch = trimmed.match(/\/p\/(\d+)(?:[/?#]|$)/i)
+  if (urlMatch) return urlMatch[1]
+  const codeMatch = trimmed.match(/^ALFIO-(\d+)$/i)
+  if (codeMatch) return codeMatch[1]
+  return null
+}
+
+function mapCuotaStatus(estado: string, dueDate: string): InstallmentStatus {
+  if (estado === 'pagada') return 'paid'
+  const today = new Date().toISOString().slice(0, 10)
+  if (estado === 'vencida' || (dueDate && dueDate < today)) return 'overdue'
+  return 'pending'
+}
+
 export const alfioApi = {
   /**
-   * Obtiene los productos comprados y las cuotas pendientes del usuario.
-   * Endpoint futuro: GET /api/v1/users/:walletAddress/portfolio
+   * Obtiene los productos comprados y las cuotas pendientes del usuario
+   * usando las rutas del backend:
+   * GET /api/v1/clients/wallet/:wallet -> GET /api/v1/creditos/cliente/:id -> GET /api/v1/cuotas/credito/:id
    */
   async getUserPortfolio(walletAddress: string): Promise<UserPortfolioResponse> {
     if (isRemoteApiConfigured) {
-      return apiRequest<UserPortfolioResponse>(
-        `/api/v1/users/${encodeURIComponent(walletAddress)}/portfolio`,
+      let cliente: BackendClientResponse
+      try {
+        cliente = await apiRequest<BackendClientResponse>(
+          RUTA_CLIENTE_POR_WALLET(walletAddress),
+        )
+      } catch {
+        return { purchasedProducts: [], pendingInstallments: [] }
+      }
+
+      const [creditos, productos, tiendas] = await Promise.all([
+        apiRequest<BackendCreditoResponse[]>(RUTA_CREDITOS_POR_CLIENTE(cliente.id)),
+        apiRequest<BackendProductoResponse[]>(RUTA_CATALOGO_PRODUCTOS),
+        apiRequest<BackendTiendaResponse[]>(RUTA_OBTENER_TIENDAS),
+      ])
+
+      const productosById = new Map(productos.map((p) => [p.id, p]))
+      const tiendasById = new Map(tiendas.map((t) => [t.id, t]))
+
+      const cuotasPerCredito = await Promise.all(
+        creditos.map((c) =>
+          apiRequest<BackendCuotaResponse[]>(RUTA_CUOTAS_POR_CREDITO(c.id)),
+        ),
       )
+
+      const purchasedProducts: PurchasedProduct[] = []
+      const pendingInstallments: PendingInstallment[] = []
+
+      creditos.forEach((credito, idx) => {
+        const cuotas = cuotasPerCredito[idx] ?? []
+        const prod = productosById.get(credito.producto_id)
+        const tienda = prod ? tiendasById.get(prod.tienda_id) : undefined
+        const storeName =
+          prod?.tienda_nombre || tienda?.nombre || 'Tienda afiliada'
+        const paidCount = cuotas.filter((q) => q.estado === 'pagada').length
+        const totalInstallments = cuotas.length || 4
+
+        purchasedProducts.push({
+          id: String(credito.id),
+          productId: String(credito.producto_id),
+          productName:
+            credito.producto_nombre ||
+            prod?.nombre ||
+            `Producto #${credito.producto_id}`,
+          storeName,
+          purchasedAt: (credito.fecha || '').slice(0, 10),
+          totalAmountUsdc: credito.total,
+          downPaymentPaidUsdc: credito.inicial,
+          paidInstallments: paidCount,
+          totalInstallments,
+          status:
+            credito.estado === 'pagado' || paidCount >= totalInstallments
+              ? 'completed'
+              : 'active',
+        })
+
+        for (const q of cuotas) {
+          if (q.estado === 'pagada') continue
+          const dueDate = (q.vencimiento || '').slice(0, 10)
+          pendingInstallments.push({
+            id: String(q.id),
+            purchaseId: String(credito.id),
+            productName:
+              credito.producto_nombre ||
+              prod?.nombre ||
+              `Producto #${credito.producto_id}`,
+            storeName,
+            installmentNumber: q.numero,
+            totalInstallments,
+            amountUsdc: q.monto,
+            dueDate,
+            status: mapCuotaStatus(q.estado, dueDate),
+            memo: q.memo,
+            destinationWallet: tienda?.billetera_g || '',
+          })
+        }
+      })
+
+      return { purchasedProducts, pendingInstallments }
     }
 
     return {
@@ -44,50 +258,64 @@ export const alfioApi = {
 
   /**
    * Obtiene solo los productos comprados del usuario.
-   * Endpoint futuro: GET /api/v1/users/:walletAddress/purchases
    */
   async getPurchasedProducts(walletAddress: string): Promise<PurchasedProduct[]> {
     if (isRemoteApiConfigured) {
-      return apiRequest<PurchasedProduct[]>(
-        `/api/v1/users/${encodeURIComponent(walletAddress)}/purchases`,
-      )
+      const portfolio = await this.getUserPortfolio(walletAddress)
+      return portfolio.purchasedProducts
     }
     return structuredClone(mockPurchasedProducts)
   },
 
   /**
    * Obtiene solo las cuotas/productos pendientes de pago.
-   * Endpoint futuro: GET /api/v1/users/:walletAddress/installments?status=pending
    */
   async getPendingInstallments(walletAddress: string): Promise<PendingInstallment[]> {
     if (isRemoteApiConfigured) {
-      return apiRequest<PendingInstallment[]>(
-        `/api/v1/users/${encodeURIComponent(walletAddress)}/installments?status=pending`,
-      )
+      const portfolio = await this.getUserPortfolio(walletAddress)
+      return portfolio.pendingInstallments
     }
     return structuredClone(mockPendingInstallments)
   },
 
   /**
-   * Lista el catálogo de productos disponibles (útil para pruebas/QR).
-   * Endpoint futuro: GET /api/v1/products
+   * Lista el catálogo de productos disponibles: GET /api/v1/productos
    */
   async getProductsCatalog(): Promise<ProductCatalogItem[]> {
     if (isRemoteApiConfigured) {
-      return apiRequest<ProductCatalogItem[]>('/api/v1/products')
+      const [productos, tiendas] = await Promise.all([
+        apiRequest<BackendProductoResponse[]>(RUTA_CATALOGO_PRODUCTOS),
+        apiRequest<BackendTiendaResponse[]>(RUTA_OBTENER_TIENDAS),
+      ])
+      const tiendasById = new Map(tiendas.map((t) => [t.id, t]))
+      return productos.map((p) => mapProductoToCatalogItem(p, tiendasById))
     }
     return structuredClone(mockCatalog)
   },
 
   /**
-   * Busca un producto a partir del código escaneado en el QR.
-   * Endpoint futuro: GET /api/v1/products/qr/:qrCode
+   * Busca un producto a partir del QR escaneado usando GET /p/:id
    */
   async getProductByQrCode(qrCode: string): Promise<ProductCatalogItem | null> {
     const normalized = qrCode.trim().toUpperCase()
     if (isRemoteApiConfigured) {
-      return apiRequest<ProductCatalogItem>(
-        `/api/v1/products/qr/${encodeURIComponent(normalized)}`,
+      const numericId = extractNumericProductId(qrCode)
+      if (numericId) {
+        const [producto, tiendas] = await Promise.all([
+          apiRequest<BackendProductoResponse>(RUTA_PRODUCTO_POR_QR(numericId)),
+          apiRequest<BackendTiendaResponse[]>(RUTA_OBTENER_TIENDAS),
+        ])
+        const tiendasById = new Map(tiendas.map((t) => [t.id, t]))
+        return mapProductoToCatalogItem(producto, tiendasById)
+      }
+
+      const catalog = await this.getProductsCatalog()
+      return (
+        catalog.find(
+          (item) =>
+            item.qrCode.toUpperCase() === normalized ||
+            item.id.toUpperCase() === normalized,
+        ) ?? null
       )
     }
     return (
@@ -100,17 +328,58 @@ export const alfioApi = {
   },
 
   /**
-   * Registra una nueva compra a crédito (50% inicial + 4 cuotas cada 15 días).
-   * Endpoint futuro: POST /api/v1/purchases
+   * Registra una nueva compra a crédito usando:
+   * POST /api/v1/creditos y POST /api/v1/cuotas/generar
    */
   async createCreditPurchase(
     payload: CreateCreditPurchaseRequest,
   ): Promise<PurchasedProduct> {
     if (isRemoteApiConfigured) {
-      return apiRequest<PurchasedProduct>('/api/v1/purchases', {
+      const [cliente, producto] = await Promise.all([
+        apiRequest<BackendClientResponse>(
+          RUTA_CLIENTE_POR_WALLET(payload.walletAddress),
+        ),
+        apiRequest<BackendProductoResponse>(RUTA_PRODUCTO_POR_ID(payload.productId)),
+      ])
+
+      const total = Number((producto.precio_usd * 1.05).toFixed(2))
+      const inicial = Number((total / 2).toFixed(2))
+      const saldoRestante = Number((total - inicial).toFixed(2))
+
+      const credito = await apiRequest<BackendCreditoResponse>(RUTA_CREAR_CREDITO, {
         method: 'POST',
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          cliente_id: cliente.id,
+          producto_id: producto.id,
+          total,
+          inicial,
+          estado: 'activo',
+        }),
       })
+
+      await apiRequest<BackendCuotaResponse[]>(RUTA_GENERAR_CUOTAS, {
+        method: 'POST',
+        body: JSON.stringify({
+          credito_id: credito.id,
+          saldo_restante: saldoRestante,
+          cantidad_cuotas: 4,
+          intervalo_dias: 15,
+        }),
+      })
+
+      return {
+        id: String(credito.id),
+        productId: String(credito.producto_id),
+        productName: producto.nombre,
+        storeName: producto.tienda_nombre || `Tienda #${producto.tienda_id}`,
+        purchasedAt: (credito.fecha || new Date().toISOString()).slice(0, 10),
+        totalAmountUsdc: credito.total,
+        downPaymentPaidUsdc: credito.inicial,
+        paidInstallments: 0,
+        totalInstallments: 4,
+        status: 'active',
+        txHash: payload.downPaymentTxHash,
+      }
     }
 
     const product = mockCatalog.find((p) => p.id === payload.productId)
@@ -163,18 +432,29 @@ export const alfioApi = {
   },
 
   /**
-   * Marca una cuota como pagada tras confirmar el pago en Stellar.
-   * Endpoint futuro: POST /api/v1/installments/:installmentId/pay
+   * Registra el pago y actualiza el estado de la cuota usando:
+   * POST /api/v1/pagos y PATCH /api/v1/cuotas/:id/estado
    */
   async payInstallment(payload: PayInstallmentRequest): Promise<void> {
     if (isRemoteApiConfigured) {
-      await apiRequest<void>(
-        `/api/v1/installments/${encodeURIComponent(payload.installmentId)}/pay`,
-        {
+      const cuotaId = Number(payload.installmentId)
+      if (payload.txHash && Number.isFinite(cuotaId) && cuotaId > 0) {
+        const pending = await this.getPendingInstallments(payload.walletAddress)
+        const target = pending.find((i) => i.id === payload.installmentId)
+        await apiRequest(RUTA_REGISTRAR_PAGO, {
           method: 'POST',
-          body: JSON.stringify(payload),
-        },
-      )
+          body: JSON.stringify({
+            cuota_id: cuotaId,
+            monto: target?.amountUsdc ?? 1,
+            hash_stellar: payload.txHash,
+          }),
+        })
+      }
+
+      await apiRequest(RUTA_ACTUALIZAR_ESTADO_CUOTA(payload.installmentId), {
+        method: 'PATCH',
+        body: JSON.stringify({ estado: 'pagada' }),
+      })
       return
     }
 
