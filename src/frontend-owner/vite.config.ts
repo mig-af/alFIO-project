@@ -7,7 +7,8 @@ export default defineConfig({
   envPrefix: ['VITE_', 'POLLLAR_', 'POLLAR_'],
   server:{
     allowedHosts:[
-      "bc6bae98782aaf9d-135-237-130-224.serveousercontent.com",
+      
+      "3e767aae58e3d3c5-135-237-130-235.serveousercontent.com"
     ]
   }
 })

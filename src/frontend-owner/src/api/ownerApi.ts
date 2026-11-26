@@ -213,6 +213,29 @@ export const ownerApi = {
   },
 
   /**
+   * Verifica si la tienda existe en la DB por billetera G... (y correo si se provee).
+   */
+  async verifyOwnerRegistered(
+    walletAddress: string,
+    email?: string,
+  ): Promise<OwnerProfile | null> {
+    if (!isRemoteApiConfigured) {
+      return structuredClone(mockOwnerProfile)
+    }
+    try {
+      const found = await apiRequest<BackendTiendaResponse>(
+        RUTA_PERFIL_OWNER_POR_WALLET(walletAddress),
+      )
+      if (email && found.email_panel.toLowerCase() !== email.trim().toLowerCase()) {
+        return null
+      }
+      return mapTiendaToProfile(found)
+    } catch {
+      return null
+    }
+  },
+
+  /**
    * Obtiene el perfil de la tienda: GET /api/v1/tiendas/wallet/:wallet o GET /api/v1/tiendas
    */
   async getOwnerProfile(walletAddress?: string): Promise<OwnerProfile> {
